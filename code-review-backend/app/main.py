@@ -1,0 +1,92 @@
+# app/main.py
+from fastapi import FastAPI
+from collections import defaultdict
+from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+import os
+from fastapi import Request
+from fastapi.responses import JSONResponse
+import logging
+import time
+
+load_dotenv()  # Loads .env vars early so env vars (e.g. JWT_SECRET) are available to imported modules
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# ✅ Add environment variable validation
+REQUIRED_ENV_VARS = [
+    "GITHUB_CLIENT_ID",
+    "GITHUB_CLIENT_SECRET",
+    "OPENAI_API_KEY",
+    "JWT_SECRET"
+]
+
+def validate_environment():
+    """Validate that all required environment variables are set"""
+    missing_vars = [var for var in REQUIRED_ENV_VARS if not os.getenv(var)]
+    if missing_vars:
+        raise EnvironmentError(
+            f"Missing required environment variables: {', '.join(missing_vars)}\n"
+            f"Please check your .env file"
+        )
+
+# Validate environment on startup
+validate_environment()
+
+from app.api import auth
+from app.api import profile
+from app.api import protected
+from app.api import repositories
+from app.api import reviews
+# Remove this line: from app.api import create_pr
+
+app = FastAPI(title="AI Code Review API", description="Backend for code review assistant.")
+
+RATE_LIMIT = 30  # requests per minute
+user_requests = defaultdict(list)
+
+# CORS - allow frontend to talk to backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],  # Only allow frontend origin
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"]
+)
+
+# Example root endpoint
+@app.get("/")
+async def root():
+    return {"message": "API running"}
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logging.info(f"Incoming: {request.method} {request.url}")
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.middleware("http")
+async def rate_limiter(request: Request, call_next):
+    user_ip = request.client.host
+    now = time.time()
+    # Keep only requests in last minute
+    user_requests[user_ip] = [t for t in user_requests[user_ip] if now - t < 60]
+    if len(user_requests[user_ip]) >= RATE_LIMIT:
+        return JSONResponse(status_code=429, content={"error": "Rate limit exceeded"})
+    user_requests[user_ip].append(now)
+    return await call_next(request)
+
+# Include routers
+app.include_router(auth.router)
+app.include_router(profile.router)
+app.include_router(protected.router)
+app.include_router(repositories.router)
+app.include_router(reviews.router)
